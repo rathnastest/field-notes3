@@ -121,6 +121,15 @@ document.addEventListener('click', async (event) => {
     return;
   }
 
+  // FedCM requires the relying party to call navigator.credentials.get synchronously from a
+  // top-level user gesture. A click inside the cross-origin session frame followed by postMessage
+  // loses that activation before it reaches this page, so the account control owns sign-in.
+  const accountControl = event.target.closest('[data-user-control]');
+  if (accountControl && !sessionUser && sessionFrameToken) {
+    fedCmSession('active');
+    return;
+  }
+
   const dialogControl = event.target.closest('[data-open-dialog]');
   if (dialogControl) {
     const dialog = document.getElementById(dialogControl.dataset.openDialog);
@@ -323,6 +332,108 @@ const pendingEngagementWrites = new Map();
  * and the comment they were typing keeps its text and its caret.
  */
 let pendingIntent = null;
+const sessionFrame = document.querySelector('[data-gala-session-frame]');
+const sessionOrigin = sessionFrame ? new URL(sessionFrame.src).origin : null;
+const sessionSiteId = sessionFrame ? new URL(sessionFrame.src).searchParams.get('siteId') ?? '' : '';
+const resumeStorageKey = `gala.reader.resume.${sessionSiteId}`;
+let sessionFrameReady = false;
+let pendingSessionTransferCode = null;
+let sessionFrameToken = null;
+let fedCmController = null;
+const FEDCM_GRANT_COOKIE = 'gala-fedcm-grant=1';
+
+function hasFedCmGrant() {
+  try {
+    return document.cookie.split(';').some((value) => value.trim() === FEDCM_GRANT_COOKIE);
+  } catch (error) {
+    console.warn('Gala could not read this publication\'s FedCM grant marker.', error);
+    return false;
+  }
+}
+
+function rememberFedCmGrant() {
+  try {
+    document.cookie = 'gala-fedcm-grant=1; Max-Age=31536000; Path=/; SameSite=Strict; Secure';
+  } catch (error) {
+    console.warn('Gala could not remember this publication\'s FedCM grant.', error);
+  }
+}
+
+function forgetFedCmGrant() {
+  try {
+    document.cookie = 'gala-fedcm-grant=; Max-Age=0; Path=/; SameSite=Strict; Secure';
+  } catch (error) {
+    console.warn('Gala could not clear this publication\'s FedCM grant.', error);
+  }
+}
+
+function deliverSessionTransfer() {
+  if (!sessionFrameReady || !sessionFrame || !pendingSessionTransferCode) return;
+  sessionFrame.contentWindow?.postMessage({
+    type: 'gala-session-transfer', transferCode: pendingSessionTransferCode,
+  }, sessionOrigin);
+  pendingSessionTransferCode = null;
+}
+
+function requestSessionState() {
+  sessionFrame?.contentWindow?.postMessage({ type: 'gala-session-request' }, sessionOrigin);
+}
+
+if (sessionFrame) {
+  // Wait for navigation away from the inherited about:blank origin before targeting the API.
+  sessionFrame.addEventListener('load', requestSessionState);
+}
+
+function storedResumeCode() {
+  try { return localStorage.getItem(resumeStorageKey); } catch { return null; }
+}
+
+function rememberResumeCode(code) {
+  try { code ? localStorage.setItem(resumeStorageKey, code) : localStorage.removeItem(resumeStorageKey); } catch {}
+}
+
+async function fedCmSession(mode) {
+  const status = document.querySelector('[data-engagement-status]');
+  if (!sessionFrameToken) return false;
+  if (!globalThis.IdentityCredential || typeof navigator.credentials?.get !== 'function') {
+    if (status) status.textContent = 'FedCM is not available in this browser. Use a current browser to sign in.';
+    return false;
+  }
+  if (fedCmController) {
+    if (mode === 'passive') return false;
+    fedCmController.abort();
+  }
+  const controller = new AbortController();
+  fedCmController = controller;
+  try {
+    const provider = {
+      configURL: 'https://api.gala67.com/v1/fedcm/config.json',
+      clientId: sessionSiteId,
+      fields: ['name', 'email'],
+      params: { nonce: sessionFrameToken }
+    };
+    const identity = { providers: [provider] };
+    if (mode === 'active') identity.mode = 'active';
+    const credential = await navigator.credentials.get({
+      identity,
+      mediation: mode === 'active' ? 'required' : 'silent',
+      signal: controller.signal
+    });
+    if (typeof credential?.token !== 'string') return false;
+    if (mode === 'active') rememberFedCmGrant();
+    pendingSessionTransferCode = credential.token;
+    deliverSessionTransfer();
+    return true;
+  } catch (error) {
+    if (mode === 'active' && error?.name !== 'NotAllowedError' && error?.name !== 'AbortError') {
+      console.error('Gala FedCM sign-in failed.', error);
+    }
+    if (mode === 'active' && status) status.textContent = 'Sign-in did not finish. Try again.';
+    return false;
+  } finally {
+    if (fedCmController === controller) fedCmController = null;
+  }
+}
 
 function requestSession(intent) {
   const field = intent.field;
@@ -334,20 +445,10 @@ function requestSession(intent) {
     draft: field ? field.value : null,
     caret: field ? field.selectionStart : null
   };
-  // One window, not three. Asking used to open a modal, containing a frame, containing a
-  // button, that opened a popup. The popup is the only part that has to exist, because it is
-  // the only one running at the top level on the origin the identity providers accept.
-  const frame = document.querySelector('[data-gala-session-frame]');
-  const status = document.querySelector('[data-engagement-status]');
-  if (!frame) return;
-  const source = new URL(frame.getAttribute('src'), window.location.href);
-  const signIn = new URL('/v1/widget/session/sign-in', source.origin);
-  signIn.searchParams.set('siteId', source.searchParams.get('siteId') ?? '');
   if (field) field.blur();
-  if (!window.open(signIn, 'gala-sign-in', 'popup,width=520,height=680')) {
-    pendingIntent = null;
-    if (status) status.textContent = 'Allow pop-ups for this site to sign in, then try again.';
-  }
+  fedCmSession('active').then((started) => {
+    if (!started) pendingIntent = null;
+  });
 }
 
 /** Puts the reader back exactly where the sign-in interrupted them. */
@@ -375,37 +476,10 @@ function resumeIntent() {
   element.click();
 }
 
-// Signing in happens in another window, so the moment this one is focused again is the moment
-// the reader is back and the interrupted action can be finished.
-window.addEventListener('focus', () => {
-  if (sessionUser && pendingIntent) resumeIntent();
-});
-
-/*
- * The sign-in window reports success to this page rather than to the account frame.
- *
- * It cannot reach the frame directly: a frame embedded in a publication has its storage - and its
- * BroadcastChannel - partitioned away from a window running at the top level on the API's origin,
- * so the session it wrote is invisible there. The signal carries no token; it only says a sign-in
- * happened, and this asks the frame to look again. Without it the frame never learns the reader
- * signed in, and every click asks them to sign in once more.
- */
-window.addEventListener('message', (event) => {
-  const frame = document.querySelector('[data-gala-session-frame]');
-  if (!frame || event.data?.type !== 'gala-session-established') return;
-  const apiOrigin = new URL(frame.src).origin;
-  if (event.origin !== apiOrigin || typeof event.data.transferCode !== 'string') return;
-  frame.contentWindow?.postMessage({
-    type: 'gala-session-transfer', transferCode: event.data.transferCode,
-  }, apiOrigin);
-});
-
 document.querySelectorAll('[data-engagement-url]').forEach((region) => {
   refreshEngagement(region);
   recordView(region);
 });
-
-const sessionFrame = document.querySelector('[data-gala-session-frame]');
 
 function engagementErrorMessage(code) {
   if (code === 'AUTHENTICATION_REQUIRED' || code === 'INVALID_BEARER_TOKEN'
@@ -480,9 +554,16 @@ async function mutateEngagement(region, operation, payload) {
 }
 
 if (sessionFrame) {
-  const sessionOrigin = new URL(sessionFrame.src).origin;
   window.addEventListener('message', (event) => {
     if (event.origin !== sessionOrigin || event.source !== sessionFrame.contentWindow) return;
+    if (event.data?.type === 'gala-fedcm-sign-out') {
+      rememberResumeCode(null);
+      forgetFedCmGrant();
+      navigator.credentials?.preventSilentAccess?.().catch((error) => {
+        console.error('Gala could not disable silent FedCM access after sign-out.', error);
+      });
+      return;
+    }
     if (event.data?.type === 'gala-engagement-result') {
       const pending = pendingEngagementWrites.get(event.data.requestId);
       if (!pending) return;
@@ -515,7 +596,21 @@ if (sessionFrame) {
       return;
     }
     if (event.data?.type !== 'gala-session') return;
+    sessionFrameReady = true;
+    const resumeCode = storedResumeCode();
+    if (!event.data.user && resumeCode) {
+      sessionFrame.contentWindow?.postMessage({
+        type: 'gala-session-resume', resumeCode,
+      }, sessionOrigin);
+    }
+    if (typeof event.data.frameToken === 'string') {
+      sessionFrameToken = event.data.frameToken;
+      document.querySelector('[data-user-control]')?.setAttribute('data-fedcm-ready', 'true');
+    }
+    if (pendingSessionTransferCode) deliverSessionTransfer();
     sessionUser = event.data.user && typeof event.data.user.id === 'string' ? event.data.user : null;
+    if (typeof event.data.resumeCode === 'string') rememberResumeCode(event.data.resumeCode);
+    else if (event.data.resumeRejected === true) rememberResumeCode(null);
     const control = document.querySelector('[data-user-control]');
     const displayName = sessionUser?.displayName;
     if (control) {
@@ -545,5 +640,9 @@ if (sessionFrame) {
     });
     // Signed in on the back of an interrupted action: finish what they were doing.
     if (sessionUser && pendingIntent) resumeIntent();
+    const resumeFinished = !resumeCode || event.data.resumeRejected === true;
+    if (!sessionUser && sessionFrameToken && resumeFinished && hasFedCmGrant()) {
+      fedCmSession('passive');
+    }
   });
 }
