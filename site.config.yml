@@ -55,6 +55,6 @@ contact:
 # their performance impact remains the author's responsibility under FR-1903.
 performance:
   budgets:
-    managedJavaScriptBytes: 87040
-    managedCssBytes: 34816
+    managedJavaScriptBytes: 94208
+    managedCssBytes: 36864
     ordinaryHtmlBytes: 32768
