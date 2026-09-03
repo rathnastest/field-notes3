@@ -15,6 +15,8 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   publish:
@@ -22,6 +24,7 @@ jobs:
     with:
       operation: build
       mode: __BUILD_MODE__
+      attest-build: __ATTEST_BUILDS__
       site-id: __SITE_ID__
       api-base-url: ${{ vars.GALA_API_BASE_URL }}
       output-directory: _site
