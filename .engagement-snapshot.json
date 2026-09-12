@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "refreshedAt": "2026-09-11T16:59:41.274586470Z",
+  "refreshedAt": "2026-09-12T16:11:15.125412335Z",
   "articles": {
     "01M16QXSXXJN5KD9Z3P7973PHS": {
       "reactions": 0,
       "comments": 0,
-      "views": 0,
-      "activeReadingSeconds": 0
+      "views": 2,
+      "activeReadingSeconds": 5
     }
   }
 }
