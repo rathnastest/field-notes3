@@ -1,0 +1,12 @@
+# rathnastest
+
+> Articles published by rathnastest.
+
+This experimental discovery file lists clean Markdown alternatives and canonical HTML pages.
+It is not an access grant or a license. See robots.txt and the linked RSL file when present.
+
+## Articles
+
+- [Example post](https://rathnastest.github.io/field-notes3/en/example/index.md): Published 2026-08-10 in en. [HTML](https://rathnastest.github.io/field-notes3/en/example/) [Provenance](https://rathnastest.github.io/field-notes3/en/example/provenance/)
+
+Sitemap: https://rathnastest.github.io/field-notes3/sitemap.xml
